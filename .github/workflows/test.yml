@@ -1,0 +1,68 @@
+name: Test action
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: QAVF package specification to test (empty means the latest release)
+        required: false
+        default: ""
+permissions:
+  contents: read
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  action:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      # Until the first PyPI release, test against the QAVF repository.
+      PACKAGE: ${{ inputs.package || 'git+https://github.com/AhmedAredah/qavf' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Create passing and failing demo projects
+        shell: bash
+        run: |
+          spec="${PACKAGE:-qavf[stats]}"
+          uvx --from "$spec" qavf demo clean --clean
+          uvx --from "$spec" qavf demo defects
+
+      - id: clean
+        uses: ./
+        with:
+          config: clean/qavf.yaml
+          package: ${{ env.PACKAGE }}
+          report-dir: clean-report
+          artifact-name: clean-report-${{ matrix.os }}
+
+      - id: defects
+        uses: ./
+        with:
+          config: defects/qavf.yaml
+          package: ${{ env.PACKAGE }}
+          report-dir: defects-report
+          artifact-name: defects-report-${{ matrix.os }}
+          fail: "false"
+
+      - name: Check outputs
+        shell: bash
+        env:
+          CLEAN: ${{ steps.clean.outputs.verdict }}
+          DEFECTS: ${{ steps.defects.outputs.verdict }}
+          DEFECTS_CODE: ${{ steps.defects.outputs.exit-code }}
+        run: |
+          echo "clean=$CLEAN defects=$DEFECTS ($DEFECTS_CODE)"
+          test "$CLEAN" = passed
+          test "$DEFECTS" = failed
+          test "$DEFECTS_CODE" = 1
+          test -f clean-report/qa_report.html

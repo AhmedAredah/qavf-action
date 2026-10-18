@@ -1,0 +1,131 @@
+name: QAVF data QA
+description: Run QAVF data quality checks, publish a job summary and annotations, and upload the HTML/JSON report.
+author: Ahmed Aredah
+branding:
+  icon: check-circle
+  color: green
+
+inputs:
+  config:
+    description: Path to the QAVF configuration file (YAML or JSON).
+    required: true
+  version:
+    description: QAVF version to install, for example 0.4.0. Defaults to the latest release.
+    required: false
+    default: ""
+  extras:
+    description: Optional extras, comma separated (stats, pandas, all).
+    required: false
+    default: stats
+  package:
+    description: Package specification overriding version and extras (for example a Git URL).
+    required: false
+    default: ""
+  python-version:
+    description: Python version used to run QAVF.
+    required: false
+    default: "3.12"
+  fail-on:
+    description: Lowest failure severity that fails the step (INFO, WARNING, ERROR, CRITICAL). Defaults to the configuration.
+    required: false
+    default: ""
+  report-dir:
+    description: Directory for qa_report.json and qa_report.html.
+    required: false
+    default: qavf-report
+  upload-report:
+    description: Upload the report directory as a workflow artifact.
+    required: false
+    default: "true"
+  artifact-name:
+    description: Name of the uploaded report artifact.
+    required: false
+    default: qavf-report
+  annotations:
+    description: Maximum number of failed checks reported as annotations (0 disables them).
+    required: false
+    default: "20"
+  fail:
+    description: Fail the step when the QA verdict is not passed.
+    required: false
+    default: "true"
+
+outputs:
+  verdict:
+    description: QA verdict (passed, failed or incomplete), or error if no report was produced.
+    value: ${{ steps.summary.outputs.verdict }}
+  exit-code:
+    description: Exit code of qavf run (0 passed, 1 QA failed or incomplete, 2 usage or resource error).
+    value: ${{ steps.run.outputs.exit-code }}
+  report-json:
+    description: Path of the JSON report.
+    value: ${{ steps.run.outputs.report-json }}
+  report-html:
+    description: Path of the HTML report.
+    value: ${{ steps.run.outputs.report-html }}
+
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - id: run
+      shell: bash
+      env:
+        QAVF_CONFIG: ${{ inputs.config }}
+        QAVF_VERSION: ${{ inputs.version }}
+        QAVF_EXTRAS: ${{ inputs.extras }}
+        QAVF_PACKAGE: ${{ inputs.package }}
+        QAVF_FAIL_ON: ${{ inputs.fail-on }}
+        QAVF_REPORT_DIR: ${{ inputs.report-dir }}
+      run: |
+        set +e
+        spec="$QAVF_PACKAGE"
+        if [ -z "$spec" ]; then
+          spec="qavf"
+          [ -n "$QAVF_EXTRAS" ] && spec="qavf[$QAVF_EXTRAS]"
+          [ -n "$QAVF_VERSION" ] && spec="$spec==$QAVF_VERSION"
+        elif [ -n "$QAVF_EXTRAS" ] && [[ "$spec" != *"["* ]] && [[ "$spec" == *"://"* ]]; then
+          spec="qavf[$QAVF_EXTRAS] @ $spec"
+        fi
+        mkdir -p "$QAVF_REPORT_DIR"
+        json="$QAVF_REPORT_DIR/qa_report.json"
+        html="$QAVF_REPORT_DIR/qa_report.html"
+        args=(run -c "$QAVF_CONFIG" --json "$json" --html "$html")
+        [ -n "$QAVF_FAIL_ON" ] && args+=(--fail-on "$QAVF_FAIL_ON")
+        echo "::group::qavf ${args[*]} (from $spec)"
+        uvx --from "$spec" qavf "${args[@]}"
+        code=$?
+        echo "::endgroup::"
+        {
+          echo "exit-code=$code"
+          echo "report-json=$json"
+          echo "report-html=$html"
+        } >> "$GITHUB_OUTPUT"
+
+    - id: summary
+      if: always()
+      shell: bash
+      env:
+        QAVF_REPORT: ${{ steps.run.outputs.report-json }}
+        QAVF_ANNOTATIONS: ${{ inputs.annotations }}
+      run: uv run --no-project python "$GITHUB_ACTION_PATH/summary.py"
+
+    - if: always() && inputs.upload-report == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.report-dir }}
+        if-no-files-found: warn
+
+    - if: always() && inputs.fail == 'true'
+      shell: bash
+      env:
+        CODE: ${{ steps.run.outputs.exit-code }}
+      run: |
+        if [ "${CODE:-2}" != "0" ]; then
+          echo "::error title=QAVF::QA did not pass (exit code ${CODE:-2}); see the job summary and report artifact."
+          exit "${CODE:-2}"
+        fi
