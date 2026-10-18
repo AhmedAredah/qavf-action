@@ -25,8 +25,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     env:
-      # Until the first PyPI release, test against the QAVF repository.
-      PACKAGE: ${{ inputs.package || 'git+https://github.com/AhmedAredah/qavf' }}
+      # Empty tests the latest PyPI release, as users get it.
+      PACKAGE: ${{ inputs.package }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
